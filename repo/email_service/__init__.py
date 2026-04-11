@@ -1,1 +1,1 @@
-FORCE_REDEPLOY
+from .email_service import app
