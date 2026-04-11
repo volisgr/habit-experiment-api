@@ -8,7 +8,7 @@ app = FastAPI(title="Habit Experiment Email Service")
 
 # Env vars
 DATABASE_URL = os.getenv("DATABASE_URL")
-resend.api_key = os.getenv("RESEND_API_KEY") 
+resend.api_key = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@habitexperiment.com")
 
 class FirstEmailRequest(BaseModel):
@@ -30,10 +30,11 @@ async def send_first_email(req: FirstEmailRequest):
 
     if not resend.api_key:
         print("❌ RESEND_API_KEY is missing")
-        return {"status": "noop", "message": "No RESEND_API KEY"}
+        return {"status": "noop", "message": "No RESEND_API_KEY"}
 
     try:
         with get_db_conn() as conn:
+            # FIX: query the real columns from experiment_templates
             template = conn.execute("""
                 SELECT habit_1, habit_2, habit_3,
                        link_1, link_2, link_3,
@@ -51,6 +52,7 @@ async def send_first_email(req: FirstEmailRequest):
             links = [template["link_1"] or "", template["link_2"] or "", template["link_3"] or ""]
             description = template["description"] or "Behavioral research study."
 
+            # FIX: use "\n", not "\\n"
             habits_text = "\n".join([f"• {h} {'→ ' + l if l else ''}" for h, l in zip(habits, links)])
 
             email_html = f"""
@@ -81,6 +83,7 @@ async def send_first_email(req: FirstEmailRequest):
         print("💥 Exception in /send-first-email:", e)
         raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
 
+# Run locally (e.g., on Render via uvicorn)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 10000))
