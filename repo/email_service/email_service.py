@@ -9,7 +9,7 @@ app = FastAPI(title="Habit Experiment Email Service")
 # Env vars
 DATABASE_URL = os.getenv("DATABASE_URL")
 resend.api_key = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@habitexperiment.com")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
 
 class FirstEmailRequest(BaseModel):
     user_email: str
@@ -34,7 +34,7 @@ async def send_first_email(req: FirstEmailRequest):
 
     try:
         with get_db_conn() as conn:
-            # FIX: query the real columns from experiment_templates
+            # Query real columns from experiment_templates
             template = conn.execute("""
                 SELECT habit_1, habit_2, habit_3,
                        link_1, link_2, link_3,
