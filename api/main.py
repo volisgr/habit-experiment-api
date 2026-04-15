@@ -364,8 +364,7 @@ async def trigger_email_on_approved(
             """
             INSERT INTO first_email_jobs (goal, created_at, status)
             VALUES (lower(%s), NOW(), 'pending')
-            ON CONFLICT (goal) WHERE status = 'pending'
-            DO NOTHING;
+            ON CONFLICT (goal) DO NOTHING;
         """,
             (goal,),
         )
