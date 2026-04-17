@@ -1,134 +1,212 @@
 from dotenv import load_dotenv
 import os
-
+ 
 # Explicitly load .env from this file's directory
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
-
+ 
 import uuid
 from datetime import date, timedelta
-from typing import Optional
 from fastapi import FastAPI, HTTPException, Body, Path, BackgroundTasks, status
 from fastapi.responses import JSONResponse
 import psycopg
 from dateutil import parser
-import httpx
-
+import resend
+ 
 app = FastAPI(title="Habit Experiment API")
-
+ 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL env var required")
-
-# --- CHANGE THIS LINE TO MATCH YOUR EMAIL SERVICE ---
-# Locally something like:
-# EMAIL_SERVICE_URL = os.getenv("EMAIL_SERVICE_URL", "http://127.0.0.1:10000")
-# On Render:
-# EMAIL_SERVICE_URL = os.getenv("EMAIL_SERVICE_URL", "https://habit-experiment-email.onrender.com")
-EMAIL_SERVICE_URL = os.getenv("EMAIL_SERVICE_URL", "http://127.0.0.1:10000")
-
-
+ 
+resend.api_key = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
+ 
+ 
 def get_db_conn():
     return psycopg.connect(DATABASE_URL, row_factory=psycopg.rows.dict_row)
-
-
-# --- FIRST‑EMAIL JOB HANDLER (BACKGROUND) ---
-def process_first_email_jobs(goal: str):
+ 
+ 
+# --- SEND FIRST EMAIL (direct Resend call, no microservice) ---
+def send_first_email(user_email: str, goal: str, experiment_id: str, start_date: str) -> bool:
+    """Send first email via Resend. Returns True on success, False on failure."""
+    if not resend.api_key:
+        print("❌ RESEND_API_KEY is missing")
+        return False
+ 
+    try:
+        with get_db_conn() as conn:
+            template = conn.execute(
+                """
+                SELECT habit_1, habit_2, habit_3,
+                       link_1, link_2, link_3,
+                       description
+                FROM experiment_templates
+                WHERE LOWER(goal) = LOWER(%s) AND approved = true
+                LIMIT 1
+            """,
+                (goal,),
+            ).fetchone()
+ 
+            if not template:
+                print("🚫 No approved template for goal:", goal)
+                return False
+ 
+            habits = [template["habit_1"], template["habit_2"], template["habit_3"]]
+            links = [template["link_1"] or "", template["link_2"] or "", template["link_3"] or ""]
+            description = template["description"] or "Behavioral research study."
+ 
+            habits_text = "\n".join(
+                [f"• {h} {'→ ' + l if l else ''}" for h, l in zip(habits, links)]
+            )
+ 
+            email_html = f"""
+            <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px;">
+                <h2>Your 7-Day Habit Experiment: {goal}</h2>
+                <p>{description}</p>
+                <p><strong>Day 1/7 Habits:</strong></p>
+                <pre style="background: #f8f9fa; padding: 20px; border-radius: 6px;">{habits_text}</pre>
+                <p><a href="https://habit-experiment-api.onrender.com/progress/{user_email}/{experiment_id}">
+                    View Progress
+                </a></p>
+            </div>
+            """
+ 
+            resend.Emails.send(
+                {
+                    "from": EMAIL_FROM,
+                    "to": user_email,
+                    "subject": f"Your 7-Day Habit Experiment: {goal}",
+                    "html": email_html,
+                }
+            )
+            print(f"✅ Email sent to {user_email} for goal={goal}")
+            return True
+ 
+    except Exception as e:
+        print(f"💥 Exception in send_first_email: {e}")
+        return False
+ 
+ 
+# --- PROCESS PENDING EMAIL JOBS ---
+# Called by pg_cron every minute via POST /process-pending-emails
+# Also called as a background task from /trigger-email
+def process_first_email_jobs(goal: str = None):
+    """
+    Process pending first_email_jobs.
+    If goal is provided, only process jobs for that goal.
+    Otherwise process all pending jobs (used by pg_cron).
+    """
     with get_db_conn() as conn:
         cur = conn.cursor()
-        # Only grab one pending job for this goal
-        cur.execute(
-            """
-            SELECT id FROM first_email_jobs
-            WHERE lower(goal) = lower(%s)
-              AND status = 'pending'
-            FOR UPDATE SKIP LOCKED;
-        """,
-            (goal,),
-        )
-        job_row = cur.fetchone()
-        if not job_row:
-            return
-        job_id = job_row["id"]
-
-        try:
-            # Find all active experiments that still need first email for this goal
+ 
+        # Fetch pending jobs — scoped to goal if provided
+        if goal:
             cur.execute(
                 """
-                SELECT e.id, e.user_id, e.start_date, up.goal
-                FROM experiments e
-                JOIN user_profiles up ON up.user_id = e.user_id
-                WHERE e.status = 'active'
-                  AND e.needs_email = true
-                  AND lower(up.goal) = lower(%s);
+                SELECT id, goal FROM first_email_jobs
+                WHERE lower(goal) = lower(%s)
+                  AND status = 'pending'
+                FOR UPDATE SKIP LOCKED;
             """,
                 (goal,),
             )
-            pending_exps = cur.fetchall()
-
-            for exp in pending_exps:
-                # Confirm template is still approved
-                template = conn.execute(
+        else:
+            cur.execute(
+                """
+                SELECT id, goal FROM first_email_jobs
+                WHERE status = 'pending'
+                FOR UPDATE SKIP LOCKED;
+            """
+            )
+ 
+        jobs = cur.fetchall()
+ 
+        if not jobs:
+            print("ℹ️ No pending email jobs found")
+            return {"processed": 0}
+ 
+        processed = 0
+        for job in jobs:
+            job_id = job["id"]
+            job_goal = job["goal"]
+ 
+            try:
+                # Find all active experiments that still need first email for this goal
+                cur.execute(
                     """
-                    SELECT id FROM experiment_templates
-                    WHERE lower(goal) = lower(%s)
-                      AND approved = true;
+                    SELECT e.id, e.user_id, e.start_date, up.goal
+                    FROM experiments e
+                    JOIN user_profiles up ON up.user_id = e.user_id
+                    WHERE e.status = 'active'
+                      AND e.needs_email = true
+                      AND lower(up.goal) = lower(%s);
                 """,
-                    (exp["goal"],),
-                ).fetchone()
-
-                if not template:
-                    continue
-
-                try:
-                    resp = httpx.post(
-                        f"{EMAIL_SERVICE_URL}/send-first-email",
-                        json={
-                            "user_email": exp["user_id"],
-                            "goal": exp["goal"],
-                            "experiment_id": str(exp["id"]),  # UUID → string
-                            "start_date": exp["start_date"].isoformat(),
-                        },
-                        timeout=5.0,
+                    (job_goal,),
+                )
+                pending_exps = cur.fetchall()
+ 
+                emails_sent = 0
+                for exp in pending_exps:
+                    # Confirm template is still approved
+                    template = conn.execute(
+                        """
+                        SELECT id FROM experiment_templates
+                        WHERE lower(goal) = lower(%s)
+                          AND approved = true;
+                    """,
+                        (exp["goal"],),
+                    ).fetchone()
+ 
+                    if not template:
+                        continue
+ 
+                    success = send_first_email(
+                        user_email=exp["user_id"],
+                        goal=exp["goal"],
+                        experiment_id=str(exp["id"]),
+                        start_date=exp["start_date"].isoformat(),
                     )
-                    print("📧 /send-first-email →", resp.status_code, resp.text)
-                    if resp.status_code == 200:
-                        # ✅ Flip: first email sent
+ 
+                    if success:
                         conn.execute(
                             "UPDATE experiments SET needs_email = false WHERE id = %s",
                             (exp["id"],),
                         )
+                        emails_sent += 1
                     else:
-                        print("❌ Email service returned non‑200:", resp.status_code, resp.text)
-                except Exception as e:
-                    print("💥 Exception during /send-first-email:", e)
-
-            # Mark job as completed
-            cur.execute(
-                """
-                UPDATE first_email_jobs
-                SET status = 'completed', completed_at = NOW()
-                WHERE id = %s;
-            """,
-                (job_id,),
-            )
-            conn.commit()
-            print(f"✅ First emails sent for goal={goal}, job={job_id}")
-
-        except Exception as e:
-            print(f"❌ Error processing job {job_id} for goal {goal}: {e}")
-            conn.rollback()
-            cur.execute(
-                """
-                UPDATE first_email_jobs
-                SET status = 'failed', error_msg = %s
-                WHERE id = %s;
-            """,
-                (str(e), job_id),
-            )
-            conn.commit()
-
-
-# --- SUBSCRIBE FLOW (UNCHANGED, just here for context) ---
+                        print(f"❌ Failed to send email for experiment {exp['id']}")
+ 
+                # Only mark completed if all experiments were handled
+                # (no pending_exps is also a valid completed state — nothing to send)
+                cur.execute(
+                    """
+                    UPDATE first_email_jobs
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE id = %s;
+                """,
+                    (job_id,),
+                )
+                conn.commit()
+                print(f"✅ Job {job_id} completed: {emails_sent} emails sent for goal={job_goal}")
+                processed += 1
+ 
+            except Exception as e:
+                print(f"❌ Error processing job {job_id} for goal {job_goal}: {e}")
+                conn.rollback()
+                cur.execute(
+                    """
+                    UPDATE first_email_jobs
+                    SET status = 'failed', error_msg = %s
+                    WHERE id = %s;
+                """,
+                    (str(e), job_id),
+                )
+                conn.commit()
+ 
+        return {"processed": processed}
+ 
+ 
+# --- SUBSCRIBE ---
 @app.post("/subscribe")
 async def subscribe(
     email: str = Body(..., embed=True, min_length=5),
@@ -137,7 +215,7 @@ async def subscribe(
     """Create or reuse active experiment + auto-create template for researcher approval"""
     if "@" not in email or "." not in email.split("@")[-1]:
         raise HTTPException(status_code=400, detail="Invalid email format")
-
+ 
     with get_db_conn() as conn:
         # 1. Upsert user_profile
         conn.execute(
@@ -149,7 +227,7 @@ async def subscribe(
             (email, goal),
         )
         print("✅ user_profiles INSERT: user_id=", email, "goal=", goal)
-
+ 
         # 2. Check/create active experiment
         active_exp = conn.execute(
             """
@@ -160,24 +238,22 @@ async def subscribe(
         """,
             (email,),
         ).fetchone()
-
+ 
         if active_exp:
             experiment_id = active_exp["id"]
             start_date = active_exp["start_date"]
             end_date = active_exp["end_date"]
-            status = "already_subscribed"
-            needs_email = active_exp["needs_email"]
-            # Reset for new cycle (so email can be sent again)
+            sub_status = "already_subscribed"
+            # Reset for new cycle
             conn.execute(
                 "UPDATE experiments SET needs_email = true WHERE id = %s", (experiment_id,)
             )
         else:
-            # Create new
             experiment_id = str(uuid.uuid4())
             start_date = date.today()
             end_date = start_date + timedelta(days=7)
-            status = "new_subscription"
-
+            sub_status = "new_subscription"
+ 
             conn.execute(
                 """
                 INSERT INTO experiments (
@@ -186,13 +262,13 @@ async def subscribe(
             """,
                 (experiment_id, email, start_date, end_date, goal),
             )
-
-        # 3. AUTO-CREATE template (researcher edits habits + approves)
+ 
+        # 3. Auto-create template if missing
         template_exists = conn.execute(
             "SELECT id FROM experiment_templates WHERE LOWER(goal) = LOWER(%s)",
             (goal,),
         ).fetchone()
-
+ 
         if not template_exists:
             conn.execute(
                 """
@@ -201,8 +277,8 @@ async def subscribe(
             """,
                 (goal,),
             )
-
-        # 4. Check if approved → send email?
+ 
+        # 4. Check if approved → send email directly
         template_approved = conn.execute(
             """
             SELECT id FROM experiment_templates
@@ -210,47 +286,37 @@ async def subscribe(
         """,
             (goal,),
         ).fetchone()
-
-        should_send = bool(template_approved)
-
-        if should_send:
-            try:
-                resp = httpx.post(
-                    f"{EMAIL_SERVICE_URL}/send-first-email",
-                    json={
-                        "user_email": email,
-                        "goal": goal,
-                        "experiment_id": str(experiment_id),  # Ensure experiment_id is a string
-                        "start_date": start_date.isoformat(),
-                    },
-                    timeout=5.0,
+ 
+        email_sent = False
+        if template_approved:
+            email_sent = send_first_email(
+                user_email=email,
+                goal=goal,
+                experiment_id=str(experiment_id),
+                start_date=start_date.isoformat(),
+            )
+            if email_sent:
+                conn.execute(
+                    "UPDATE experiments SET needs_email = false WHERE id = %s",
+                    (experiment_id,),
                 )
-                print("📧 /send-first-email →", resp.status_code, resp.text)
-                if resp.status_code == 200:
-                    # ✅ FLIP: marks that welcome email has been sent
-                    conn.execute(
-                        "UPDATE experiments SET needs_email = false WHERE id = %s",
-                        (experiment_id,),
-                    )
-                else:
-                    print("❌ Email service returned non‑200:", resp.status_code, resp.text)
-            except Exception as e:
-                print("💥 Exception during /send-first-email:", e)
-
+ 
+        conn.commit()
+ 
         return {
-            "status": status,
+            "status": sub_status,
             "user_id": email,
             "experiment_id": experiment_id,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "template_created": template_exists is None,  # True if we auto-created
-            "email_sent": should_send,
+            "template_created": template_exists is None,
+            "email_sent": email_sent,
             "next_step": "Researcher: Edit experiment_templates row → set approved=true"
-            if not should_send
-            else "Email sent!",
+            if not template_approved
+            else "Email sent!" if email_sent else "Email failed — check logs",
         }
-
-
+ 
+ 
 # --- RECORD DAILY SCORES ---
 @app.post("/scores")
 async def record_scores(
@@ -263,9 +329,9 @@ async def record_scores(
 ):
     try:
         score_date = parser.parse(date_str).date()
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid date format (use YYYY-MM-DD)")
-
+ 
     with get_db_conn() as conn:
         exp = conn.execute(
             """
@@ -274,10 +340,10 @@ async def record_scores(
         """,
             (experiment_id, user_id),
         ).fetchone()
-
+ 
         if not exp:
             raise HTTPException(status_code=404, detail="Experiment not found or access denied")
-
+ 
         existing = conn.execute(
             """
             SELECT id FROM experiment_scores
@@ -285,12 +351,10 @@ async def record_scores(
         """,
             (experiment_id, score_date),
         ).fetchone()
-
+ 
         if existing:
-            raise HTTPException(
-                status_code=409, detail="Scores already recorded for this date"
-            )
-
+            raise HTTPException(status_code=409, detail="Scores already recorded for this date")
+ 
         conn.execute(
             """
             INSERT INTO experiment_scores (experiment_id, user_id, date, habit_1, habit_2, habit_3, created_at)
@@ -298,15 +362,15 @@ async def record_scores(
         """,
             (experiment_id, user_id, score_date, habit_1, habit_2, habit_3),
         )
-
+ 
     return JSONResponse(
         {
             "message": "Daily scores recorded successfully",
             "date": score_date.isoformat(),
         }
     )
-
-
+ 
+ 
 # --- FETCH PROGRESS ---
 @app.get("/progress/{user_id}/{experiment_id}")
 async def get_progress(user_id: str = Path(...), experiment_id: str = Path(...)):
@@ -320,61 +384,65 @@ async def get_progress(user_id: str = Path(...), experiment_id: str = Path(...))
         """,
             (experiment_id, user_id),
         ).fetchall()
-
+ 
         if not scores:
             raise HTTPException(status_code=404, detail="No scores found")
-
+ 
         days_recorded = len(scores)
         h1_total, h2_total, h3_total = 0, 0, 0
-
+ 
         for row in scores:
             h1_total += row["habit_1"]
             h2_total += row["habit_2"]
             h3_total += row["habit_3"]
-
-        habit_1_pct = round((h1_total / days_recorded) * 100, 1)
-        habit_2_pct = round((h2_total / days_recorded) * 100, 1)
-        habit_3_pct = round((h3_total / days_recorded) * 100, 1)
-        overall_pct = round(
-            ((h1_total + h2_total + h3_total) / (days_recorded * 3)) * 100, 1
-        )
-
+ 
         return {
             "user_id": user_id,
             "experiment_id": experiment_id,
             "days_recorded": days_recorded,
-            "habit_1_pct": habit_1_pct,
-            "habit_2_pct": habit_2_pct,
-            "habit_3_pct": habit_3_pct,
-            "overall_pct": overall_pct,
+            "habit_1_pct": round((h1_total / days_recorded) * 100, 1),
+            "habit_2_pct": round((h2_total / days_recorded) * 100, 1),
+            "habit_3_pct": round((h3_total / days_recorded) * 100, 1),
+            "overall_pct": round(
+                ((h1_total + h2_total + h3_total) / (days_recorded * 3)) * 100, 1
+            ),
         }
-
-
-# --- TRIGGER EMAIL (FAST, NON‑BLOCKING) ---
+ 
+ 
+# --- TRIGGER EMAIL (called by Supabase pg_net on approval) ---
 @app.post("/trigger-email")
 async def trigger_email_on_approved(
     goal: str = Body(..., embed=True),
     background_tasks: BackgroundTasks = None,
 ):
     """Called by Supabase when experiment_templates.approved = true.
-    Inserts a job into first_email_jobs and returns 200 immediately."""
+    Inserts a pending job and returns 200 immediately.
+    pg_cron will pick it up within 1 minute via /process-pending-emails."""
     with get_db_conn() as conn:
-        # Insert a job if it doesn't already exist (pending)
         conn.execute(
             """
             INSERT INTO first_email_jobs (goal, created_at, status)
             VALUES (lower(%s), NOW(), 'pending')
-            ON CONFLICT (goal) DO NOTHING;
+            ON CONFLICT (goal) DO UPDATE SET status = 'pending', completed_at = NULL;
         """,
             (goal,),
         )
         conn.commit()
-
-    # Schedule background job; endpoint returns 200 immediately
-    background_tasks.add_task(process_first_email_jobs, goal)
-
+ 
     return {
         "status": "queued",
         "goal": goal,
-        "message": "first‑email job queued; emails will be sent in background",
+        "message": "Job queued — pg_cron will process within 1 minute",
     }
+ 
+ 
+# --- PROCESS PENDING EMAILS (called by pg_cron every minute) ---
+@app.post("/process-pending-emails")
+async def process_pending_emails():
+    """
+    Called by Supabase pg_cron every minute.
+    Processes all pending first_email_jobs and sends emails directly via Resend.
+    """
+    print("🔄 /process-pending-emails called")
+    result = process_first_email_jobs(goal=None)
+    return {"status": "ok", **result}
