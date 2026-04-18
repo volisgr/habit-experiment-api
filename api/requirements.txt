@@ -1,1 +1,7 @@
+fastapi
+uvicorn
+psycopg[binary]
+python-dateutil
+python-dotenv
+httpx
 resend
