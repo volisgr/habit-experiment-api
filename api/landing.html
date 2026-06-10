@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .page { max-width: 480px; width: 100%; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #3fb950;
+    border: 1px solid rgba(63,185,80,0.3);
+    padding: 4px 12px;
+    border-radius: 20px;
+    margin-bottom: 20px;
+  }
+  .badge-dot { width: 6px; height: 6px; background: #3fb950; border-radius: 50%; }
+  h1 {
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.8px;
+    line-height: 1.2;
+    margin-bottom: 12px;
+    color: #f0f6fc;
+  }
+  h1 span { color: #3fb950; }
+  .desc {
+    font-size: 14px;
+    color: #7d8590;
+    line-height: 1.7;
+    margin-bottom: 6px;
+  }
+  .science {
+    font-size: 12px;
+    color: #484f58;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .science::before {
+    content: '';
+    display: inline-block;
+    width: 14px; height: 1px;
+    background: #484f58;
+  }
+  .perks {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .perk {
+    font-size: 12px;
+    color: #7d8590;
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 5px 10px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .perk-dot { width: 5px; height: 5px; background: #3fb950; border-radius: 50%; opacity: 0.7; }
+  .steps {
+    display: flex;
+    margin-bottom: 24px;
+  }
+  .step { flex: 1; text-align: center; position: relative; }
+  .step:not(:last-child)::after {
+    content: ''; position: absolute;
+    top: 11px; right: 0; width: 50%; height: 1px; background: #21262d;
+  }
+  .step:not(:first-child)::before {
+    content: ''; position: absolute;
+    top: 11px; left: 0; width: 50%; height: 1px; background: #21262d;
+  }
+  .step-dot {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #161b22; border: 1px solid #30363d;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 600; color: #7d8590;
+    margin: 0 auto 6px; position: relative; z-index: 1;
+  }
+  .step-dot.active { background: #0d4429; border-color: #3fb950; color: #3fb950; }
+  .step-label { font-size: 11px; color: #484f58; line-height: 1.3; }
+  .form-group { margin-bottom: 10px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 500; color: #7d8590; margin-bottom: 5px; }
+  .form-group input {
+    width: 100%; background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; padding: 11px 14px; font-size: 14px; color: #e6edf3;
+    outline: none; transition: border-color 0.15s;
+  }
+  .form-group input::placeholder { color: #484f58; }
+  .form-group input:focus { border-color: #3fb950; }
+  .btn {
+    width: 100%; background: #238636; color: white; border: none;
+    border-radius: 8px; padding: 12px; font-size: 14px; font-weight: 600;
+    cursor: pointer; margin-top: 4px; transition: background 0.15s;
+  }
+  .btn:hover { background: #2ea043; }
+  .btn:disabled { background: #21262d; color: #484f58; cursor: default; }
+  .what-you-get {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-top: 12px;
+  }
+  .what-you-get-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #484f58;
+    margin-bottom: 8px;
+  }
+  .wyg-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    color: #7d8590;
+    line-height: 1.5;
+    margin-bottom: 5px;
+  }
+  .wyg-item:last-child { margin-bottom: 0; }
+  .wyg-check { color: #3fb950; flex-shrink: 0; font-size: 12px; margin-top: 1px; }
+  .footer-note {
+    font-size: 11px; color: #484f58; text-align: center;
+    margin-top: 12px; line-height: 1.6;
+  }
+  .footer-note a { color: #3fb950; text-decoration: none; }
+  .error {
+    display: none; background: rgba(248,81,73,0.1);
+    border: 1px solid rgba(248,81,73,0.3); border-radius: 6px;
+    padding: 10px 12px; font-size: 12px; color: #ff7b72; margin-top: 8px;
+  }
+  .success { display: none; text-align: center; padding: 20px 0; }
+  .success h3 { font-size: 18px; color: #3fb950; margin-bottom: 6px; }
+  .success p { font-size: 13px; color: #7d8590; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="badge"><span class="badge-dot"></span>Behavioral research study — open enrollment</div>
+  <h1>A personal experiment to help you <span>reach your goal</span></h1>
+  <p class="desc">Participate in a structured 7-day habit study. A behavioral analyst designs 3 micro-habits for your specific goal. You track daily, we analyze, you improve — cycle by cycle.</p>
+  <p class="science">Based on peer-reviewed behavioral science</p>
+
+  <div class="perks">
+    <div class="perk"><span class="perk-dot"></span>Free to participate</div>
+    <div class="perk"><span class="perk-dot"></span>No apps to download</div>
+    <div class="perk"><span class="perk-dot"></span>Weekly newsletter included</div>
+  </div>
+
+  <div class="steps">
+    <div class="step"><div class="step-dot active">1</div><div class="step-label">Apply</div></div>
+    <div class="step"><div class="step-dot">2</div><div class="step-label">Get habits</div></div>
+    <div class="step"><div class="step-dot">3</div><div class="step-label">Track daily</div></div>
+    <div class="step"><div class="step-dot">4</div><div class="step-label">Iterate</div></div>
+  </div>
+
+  <div id="form-wrapper">
+    <div class="form-group">
+      <label>Email address</label>
+      <input type="email" id="email" placeholder="you@example.com">
+    </div>
+    <div class="form-group">
+      <label>What is your most important goal right now?</label>
+      <input type="text" id="goal" placeholder="e.g. improve my communication skills">
+    </div>
+    <button class="btn" onclick="handleSubmit()">Apply to participate →</button>
+    <div class="error" id="error"></div>
+
+    <div class="what-you-get">
+      <div class="what-you-get-title">What you get</div>
+      <div class="wyg-item"><span class="wyg-check">✓</span><span>3 personalized micro-habits designed by a behavioral analyst for your specific goal</span></div>
+      <div class="wyg-item"><span class="wyg-check">✓</span><span>Daily evening check-ins to track progress — reply by email, no app needed</span></div>
+      <div class="wyg-item"><span class="wyg-check">✓</span><span>Weekly analysis of your results and a new cycle of habits based on what worked</span></div>
+      <div class="wyg-item"><span class="wyg-check">✓</span><span>Weekly research newsletter — what habits are working across all study participants</span></div>
+    </div>
+
+    <p class="footer-note">
+      Your data is used solely for research purposes · Unsubscribe anytime<br>
+      <a href="#privacy">Privacy policy</a>
+    </p>
+  </div>
+
+  <div class="success" id="success">
+    <h3>✓ Application received</h3>
+    <p>Your analyst will design your first 3 habits<br>and send them within 48 hours.<br><br>Watch your inbox for your welcome email.</p>
+  </div>
+</div>
+
+<script>
+async function handleSubmit() {
+  const email = document.getElementById('email').value.trim();
+  const goal = document.getElementById('goal').value.trim();
+  const errorEl = document.getElementById('error');
+  errorEl.style.display = 'none';
+  if (!email || !email.includes('@')) { errorEl.textContent = 'Please enter a valid email address.'; errorEl.style.display = 'block'; return; }
+  if (!goal || goal.length < 3) { errorEl.textContent = 'Please describe your goal.'; errorEl.style.display = 'block'; return; }
+  const btn = document.querySelector('.btn');
+  btn.textContent = 'Submitting…'; btn.disabled = true;
+  try {
+    const res = await fetch('https://habit-experiment-api.onrender.com/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, goal })
+    });
+    if (res.ok) {
+      document.getElementById('form-wrapper').style.display = 'none';
+      document.getElementById('success').style.display = 'block';
+    } else {
+      const data = await res.json();
+      errorEl.textContent = data.detail || 'Something went wrong. Please try again.';
+      errorEl.style.display = 'block'; btn.textContent = 'Apply to participate →'; btn.disabled = false;
+    }
+  } catch(e) {
+    errorEl.textContent = 'Network error. Please try again.';
+    errorEl.style.display = 'block'; btn.textContent = 'Apply to participate →'; btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

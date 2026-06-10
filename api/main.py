@@ -1623,7 +1623,36 @@ async def get_progress(user_id: str = Path(...), experiment_id: str = Path(...))
             "habit_3_pct": round(h3 / days * 100, 1),
             "overall_pct": round((h1 + h2 + h3) / (days * 3) * 100, 1),
         }
+@app.get("/", response_class=HTMLResponse)
+async def landing_page():
+    with open("landing.html", "r") as f:
+        return HTMLResponse(f.read())
 
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy_page():
+    return HTMLResponse("""
+    <html>
+    <head><title>Privacy Policy — ImproveHabit</title>
+    <style>body{font-family:sans-serif;max-width:680px;margin:60px auto;padding:0 24px;color:#24292f;line-height:1.7;}h1{font-size:24px;margin-bottom:8px;}h2{font-size:16px;margin:28px 0 8px;}p{font-size:14px;color:#57606a;margin-bottom:12px;}a{color:#3fb950;}</style>
+    </head>
+    <body>
+    <h1>Privacy Policy</h1>
+    <p>Last updated: June 2026</p>
+    <h2>What we collect</h2>
+    <p>We collect your email address and goal at registration. During the study we collect your daily habit responses (Y/N) and weekly survey answers. No other personal data is collected.</p>
+    <h2>How we use it</h2>
+    <p>Your data is used exclusively for this behavioral research study — to assign habits, track progress, and analyze aggregate patterns. We do not use it for advertising or any commercial purpose.</p>
+    <h2>Who sees your data</h2>
+    <p>Only the behavioral analysts running this study. Individual data is never shared publicly. Published findings use anonymized, aggregated data only.</p>
+    <h2>Emails we send</h2>
+    <p>Welcome email, daily check-in emails, weekly review emails, and a weekly research newsletter. You may unsubscribe at any time by replying "unsubscribe" to any email.</p>
+    <h2>Data retention</h2>
+    <p>We retain your data for the duration of your participation and up to 12 months afterward. You may request deletion at any time by emailing noreply@improvehabit.com.</p>
+    <h2>Contact</h2>
+    <p>noreply@improvehabit.com</p>
+    <p><a href="/">← Back to ImproveHabit</a></p>
+    </body></html>
+    """)
 
 # --- CREATE ANALYST (one-time setup endpoint) ---
 @app.post("/admin/create-analyst")
