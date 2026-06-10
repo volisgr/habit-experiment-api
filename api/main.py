@@ -1625,7 +1625,8 @@ async def get_progress(user_id: str = Path(...), experiment_id: str = Path(...))
         }
 @app.get("/", response_class=HTMLResponse)
 async def landing_page():
-    with open("landing.html", "r") as f:
+    path = os.path.join(os.path.dirname(__file__), "landing.html")
+    with open(path, "r") as f:
         return HTMLResponse(f.read())
 
 @app.get("/privacy", response_class=HTMLResponse)
