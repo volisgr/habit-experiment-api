@@ -1654,6 +1654,40 @@ async def privacy_page():
     <p><a href="/">← Back to ImproveHabit</a></p>
     </body></html>
     """)
+# --- AMP EMAIL CHECKIN ---
+@app.post("/amp-checkin")
+async def amp_checkin(request: Request):
+    form = await request.form()
+    user_id = form.get("user_id", "").strip()
+    experiment_id = form.get("experiment_id", "").strip()
+    checkin_date_str = form.get("checkin_date", "").strip()
+    habit = int(form.get("habit", 0))
+    val = int(form.get("val", 0))
+
+    if not user_id or not experiment_id or not checkin_date_str:
+        raise HTTPException(status_code=400, detail="Missing fields")
+    if habit not in (1, 2, 3) or val not in (0, 1):
+        raise HTTPException(status_code=400, detail="Invalid habit or value")
+
+    try:
+        checkin_date = dateparser.parse(checkin_date_str).date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date")
+
+    field = f"habit_{habit}"
+    with get_db_conn() as conn:
+        conn.execute(
+            f"""
+            INSERT INTO experiment_scores
+              (experiment_id, user_id, date, habit_1, habit_2, habit_3, created_at)
+            VALUES (%s, %s, %s, 0, 0, 0, NOW())
+            ON CONFLICT (experiment_id, date) DO UPDATE SET {field} = %s
+            """,
+            (experiment_id, user_id, checkin_date, val),
+        )
+        conn.commit()
+    print(f"✅ AMP checkin: {user_id} habit_{habit}={val} for {checkin_date}")
+    return JSONResponse({"status": "ok"})
 
 # --- CREATE ANALYST (one-time setup endpoint) ---
 @app.post("/admin/create-analyst")
