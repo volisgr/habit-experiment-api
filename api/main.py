@@ -7,6 +7,9 @@ import uuid
 import secrets
 import hashlib
 import hmac
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Body, Path, Request, Form, Cookie
@@ -14,6 +17,10 @@ from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 import psycopg
 from dateutil import parser as dateparser
 import resend
+
+SMTP_HOST = "smtp.resend.com"
+SMTP_PORT = 587
+SMTP_USER = "resend"
 
 app = FastAPI(title="Habit Experiment API")
 
@@ -129,73 +136,215 @@ def send_welcome_email(user_email: str, goal: str, experiment_id: str,
         return False
 
 
+def _create_checkin_token_for_date(conn, user_email: str, experiment_id: str, checkin_date: date) -> str:
+    """Create or retrieve a checkin token for a given user+date."""
+    existing = conn.execute(
+        "SELECT token FROM checkin_tokens WHERE user_id = %s AND checkin_date = %s",
+        (user_email, checkin_date),
+    ).fetchone()
+    if existing:
+        return existing["token"]
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        """
+        INSERT INTO checkin_tokens (token, user_id, experiment_id, checkin_date)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (token, user_email, experiment_id, checkin_date),
+    )
+    return token
+
+
 def send_checkin_email(user_email: str, experiment_id: str, habits: list,
-                        dates_to_include: list, day_num: int) -> bool:
-    if not resend.api_key:
+                        dates_to_include: list, day_num: int, conn=None) -> bool:
+    """Send daily checkin email via SMTP with AMP + HTML fallback + checkin page link."""
+    resend_api_key = os.getenv("RESEND_API_KEY", "")
+    if not resend_api_key:
         return False
-    try:
-        rows = ""
-        for checkin_date, is_missed, bad_response in dates_to_include:
-            date_label = checkin_date.strftime("%A %b %d")
-            note = ""
-            if is_missed and bad_response:
-                note = '<br><small style="color:#e67e22;">⚠️ We couldn\'t understand your previous response — please reply Y or N</small>'
-            elif is_missed:
-                note = '<br><small style="color:#999;">Missing from yesterday</small>'
 
-            rows += f"""
-            <tr>
-              <td colspan="2" style="padding:8px 12px; background:#f0f0f0; font-weight:bold; font-size:13px;">
-                {date_label}{note}
-              </td>
-            </tr>"""
-            for i, habit in enumerate(habits, 1):
-                rows += f"""
-                <tr>
-                  <td style="padding:10px 12px; border-bottom:1px solid #eee;">Habit {i}: {habit}</td>
-                  <td style="padding:10px 12px; border-bottom:1px solid #eee; text-align:center; color:#999; font-size:13px;">Y / N</td>
-                </tr>"""
+    missed_count = len([d for d in dates_to_include if d[1]])
+    subject = f"Day {day_num}/7 Habit Check-in"
+    if missed_count:
+        subject += f" (+ {missed_count} missed day{'s' if missed_count > 1 else ''})"
 
-        habit_list = "\n".join([f"{i+1}. {h}" for i, h in enumerate(habits)])
-        missed_count = len([d for d in dates_to_include if d[1]])
-        subject = f"Day {day_num}/7 Habit Check-in"
-        if missed_count:
-            subject += f" (+ {missed_count} missed day{'s' if missed_count > 1 else ''})"
+    # Generate checkin tokens for all dates
+    tokens = {}
+    if conn:
+        for checkin_date, _, _ in dates_to_include:
+            tokens[checkin_date] = _create_checkin_token_for_date(
+                conn, user_email, experiment_id, checkin_date
+            )
+        conn.commit()
 
-        email_html = f"""
-        <div style="font-family:-apple-system,BlinkMacSystemFont,sans-serif; max-width:600px;">
-          <h2>Daily Habit Check-in</h2>
-          <p>Did you complete your habits? <strong>Reply with Y or N for each habit, one per line.</strong></p>
-          <table style="width:100%; border-collapse:collapse; margin:20px 0;">
-            <thead>
-              <tr style="background:#2c3e50; color:white;">
-                <th style="padding:10px 12px; text-align:left;">Habit</th>
-                <th style="padding:10px 12px;">Response</th>
-              </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-          </table>
-          <div style="background:#f8f9fa; padding:16px; border-radius:6px; margin:20px 0;">
-            <p style="margin:0 0 8px 0;"><strong>How to reply:</strong></p>
-            <p style="margin:0; font-family:monospace; white-space:pre;">{habit_list}
+    # ---- BUILD AMP HTML ----
+    amp_habit_rows = ""
+    for checkin_date, is_missed, bad_response in dates_to_include:
+        date_label = checkin_date.strftime("%A %b %d")
+        note = ""
+        if is_missed and bad_response:
+            note = "<br><small style='color:#e67e22;'>⚠️ Couldn't understand previous response</small>"
+        elif is_missed:
+            note = "<br><small style='color:#999;'>Missing from yesterday</small>"
 
-Reply with one Y or N per habit:
-Y
-N
-Y</p>
-          </div>
-          <p style="color:#999; font-size:12px;">
-            <a href="{BASE_URL}/progress/{user_email}/{experiment_id}">View your full progress</a>
-          </p>
+        amp_habit_rows += f"""
+        <div style="font-size:11px;font-weight:600;letter-spacing:0.6px;text-transform:uppercase;color:#57606a;margin:16px 0 8px 0;">
+          {date_label}{note}
         </div>"""
 
-        resend.Emails.send({
-            "from": EMAIL_FROM,
-            "to": user_email,
-            "reply_to": REPLY_TO,
-            "subject": subject,
-            "html": email_html,
-        })
+        for i, habit in enumerate(habits, 1):
+            amp_habit_rows += f"""
+        <div style="border:1px solid #e8ecef;border-radius:10px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
+          <div style="font-size:13px;color:#24292f;font-weight:500;flex:1;padding-right:10px;">Habit {i}: {habit}</div>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            <form method="POST" action-xhr="{BASE_URL}/amp-checkin" target="_top">
+              <input type="hidden" name="user_id" value="{user_email}">
+              <input type="hidden" name="experiment_id" value="{experiment_id}">
+              <input type="hidden" name="checkin_date" value="{checkin_date.isoformat()}">
+              <input type="hidden" name="habit" value="{i}">
+              <input type="hidden" name="val" value="1">
+              <button style="background:#2da44e;color:white;border:none;border-radius:6px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;" type="submit">Y</button>
+              <div class="saved">✓</div>
+            </form>
+            <form method="POST" action-xhr="{BASE_URL}/amp-checkin" target="_top">
+              <input type="hidden" name="user_id" value="{user_email}">
+              <input type="hidden" name="experiment_id" value="{experiment_id}">
+              <input type="hidden" name="checkin_date" value="{checkin_date.isoformat()}">
+              <input type="hidden" name="habit" value="{i}">
+              <input type="hidden" name="val" value="0">
+              <button style="background:#f6f8fa;color:#57606a;border:1px solid #d0d7de;border-radius:6px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;" type="submit">N</button>
+              <div class="saved">✓</div>
+            </form>
+          </div>
+        </div>"""
+
+    amp_html = f"""<!doctype html>
+<html ⚡4email>
+<head>
+  <meta charset="utf-8">
+  <script async src="https://cdn.ampproject.org/v0.js"></script>
+  <script async custom-element="amp-form" src="https://cdn.ampproject.org/v0/amp-form-0.1.js"></script>
+  <style amp4email-boilerplate>body{{-webkit-animation:-amp-start 8s steps(1,end) 0s 1 normal both;-moz-animation:-amp-start 8s steps(1,end) 0s 1 normal both;-ms-animation:-amp-start 8s steps(1,end) 0s 1 normal both;animation:-amp-start 8s steps(1,end) 0s 1 normal both}}@-webkit-keyframes -amp-start{{from{{visibility:hidden}}to{{visibility:visible}}}}@-moz-keyframes -amp-start{{from{{visibility:hidden}}to{{visibility:visible}}}}@-ms-keyframes -amp-start{{from{{visibility:hidden}}to{{visibility:visible}}}}@keyframes -amp-start{{from{{visibility:hidden}}to{{visibility:visible}}}}</style>
+  <style amp-custom>
+    body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f6f8fa;margin:0;padding:16px;}}
+    .card{{background:white;border-radius:12px;max-width:520px;margin:0 auto;padding:24px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.08);}}
+    .saved{{display:none;color:#2da44e;font-size:11px;margin-top:2px;font-weight:600;}}
+    form[submit-success] .saved{{display:block!important;}}
+    .footer{{margin-top:16px;padding-top:14px;border-top:1px solid #e8ecef;font-size:11px;color:#57606a;text-align:center;}}
+    .footer a{{color:#0969da;text-decoration:none;}}
+  </style>
+</head>
+<body>
+<div class="card">
+  <div style="font-size:11px;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;color:#57606a;margin-bottom:4px;">Day {day_num} of 7</div>
+  <h2 style="font-size:18px;font-weight:700;color:#1a2332;margin:0 0 4px 0;">Daily Habit Check-in</h2>
+  <p style="font-size:12px;color:#57606a;margin:0 0 4px 0;">Tap Y or N — saved instantly.</p>
+  {amp_habit_rows}
+  <div class="footer">
+    <a href="{BASE_URL}/progress/{user_email}/{experiment_id}">View progress</a>
+    &nbsp;·&nbsp; <a href="https://improvehabit.com/privacy">Privacy</a>
+  </div>
+</div>
+</body>
+</html>"""
+
+    # ---- BUILD HTML FALLBACK ----
+    html_rows = ""
+    for checkin_date, is_missed, bad_response in dates_to_include:
+        date_label = checkin_date.strftime("%A %b %d")
+        token = tokens.get(checkin_date, "")
+        note = ""
+        if is_missed and bad_response:
+            note = '<br><small style="color:#e67e22;">⚠️ We couldn\'t understand your previous response</small>'
+        elif is_missed:
+            note = '<br><small style="color:#999;">Missing from yesterday</small>'
+
+        checkin_url = f"{BASE_URL}/checkin/{token}" if token else f"{BASE_URL}/progress/{user_email}/{experiment_id}"
+
+        html_rows += f"""
+        <tr>
+          <td colspan="2" style="padding:8px 12px;background:#f0f0f0;font-weight:bold;font-size:13px;">
+            {date_label}{note}
+          </td>
+        </tr>"""
+        for i, habit in enumerate(habits, 1):
+            html_rows += f"""
+        <tr>
+          <td style="padding:10px 12px;border-bottom:1px solid #eee;font-size:14px;">Habit {i}: {habit}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #eee;text-align:center;">
+            <a href="{checkin_url}?h={i}&v=1" style="background:#2da44e;color:white;padding:5px 12px;border-radius:4px;text-decoration:none;font-size:12px;font-weight:600;margin-right:4px;">Y</a>
+            <a href="{checkin_url}?h={i}&v=0" style="background:#f6f8fa;color:#57606a;border:1px solid #d0d7de;padding:5px 12px;border-radius:4px;text-decoration:none;font-size:12px;font-weight:600;">N</a>
+          </td>
+        </tr>"""
+
+    # Primary checkin link (today's date)
+    today_date = dates_to_include[-1][0]
+    today_token = tokens.get(today_date, "")
+    checkin_page_url = f"{BASE_URL}/checkin/{today_token}" if today_token else f"{BASE_URL}/progress/{user_email}/{experiment_id}"
+
+    email_html = f"""
+    <div style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:560px;margin:0 auto;padding:20px;background:#f6f8fa;">
+      <div style="background:white;border-radius:12px;padding:24px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+        <div style="font-size:11px;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;color:#57606a;margin-bottom:4px;">Day {day_num} of 7</div>
+        <h2 style="font-size:18px;font-weight:700;color:#1a2332;margin:0 0 16px 0;">Daily Habit Check-in</h2>
+
+        <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+          <thead>
+            <tr style="background:#1a2332;color:white;">
+              <th style="padding:10px 12px;text-align:left;font-size:13px;">Habit</th>
+              <th style="padding:10px 12px;font-size:13px;">Response</th>
+            </tr>
+          </thead>
+          <tbody>{html_rows}</tbody>
+        </table>
+
+        <div style="text-align:center;margin:20px 0;">
+          <a href="{checkin_page_url}"
+             style="background:#1a2332;color:white;padding:12px 28px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;display:inline-block;">
+            Check in now →
+          </a>
+        </div>
+
+        <div style="border-top:1px solid #e8ecef;padding-top:14px;font-size:11px;color:#57606a;text-align:center;">
+          <a href="{BASE_URL}/progress/{user_email}/{experiment_id}" style="color:#0969da;text-decoration:none;">View progress</a>
+          &nbsp;·&nbsp; <a href="https://improvehabit.com/privacy" style="color:#0969da;text-decoration:none;">Privacy</a>
+          &nbsp;·&nbsp; Reply "unsubscribe" to stop
+        </div>
+      </div>
+    </div>"""
+
+    # ---- PLAIN TEXT ----
+    habit_list = "\n".join([f"{i+1}. {h}" for i, h in enumerate(habits)])
+    plain_text = f"""Daily Habit Check-in — Day {day_num} of 7
+
+Did you complete your habits today?
+
+{habit_list}
+
+Check in here: {checkin_page_url}
+
+Or reply Y or N for each habit, one per line.
+
+---
+ImproveHabit · https://improvehabit.com
+"""
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["From"] = EMAIL_FROM
+        msg["To"] = user_email
+        msg["Subject"] = subject
+        msg["Reply-To"] = REPLY_TO
+
+        msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+        msg.attach(MIMEText(amp_html, "x-amp-html", "utf-8"))
+        msg.attach(MIMEText(email_html, "html", "utf-8"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, resend_api_key)
+            server.sendmail(EMAIL_FROM, user_email, msg.as_string())
+
+        print(f"✅ Checkin email sent to {user_email} day={day_num}")
         return True
     except Exception as e:
         print(f"💥 send_checkin_email to {user_email}: {e}")
@@ -463,6 +612,7 @@ def send_daily_checkins():
                 habits=habits,
                 dates_to_include=dates_to_include,
                 day_num=day_num,
+                conn=conn,
             )
 
             if success:
@@ -1513,7 +1663,8 @@ async def inbound_email(request: Request):
 
 
 @app.get("/checkin/{token}", response_class=HTMLResponse)
-async def checkin_page(token: str):
+async def checkin_page(token: str, h: int = None, v: int = None):
+    """Checkin page — works as standalone page and as target for HTML email Y/N links."""
     with get_db_conn() as conn:
         row = conn.execute(
             """
@@ -1529,33 +1680,69 @@ async def checkin_page(token: str):
         ).fetchone()
 
         if not row:
-            return HTMLResponse("<h2>This link has expired or is invalid.</h2>", status_code=404)
+            return HTMLResponse("""
+            <html><body style="font-family:sans-serif;text-align:center;margin-top:80px;color:#1a2332;">
+              <h2>This link has expired or is invalid.</h2>
+              <p><a href="https://improvehabit.com">ImproveHabit</a></p>
+            </body></html>""", status_code=404)
+
+        # If Y/N query params passed from HTML email link, save immediately
+        pre_saved = {}
+        if h and v is not None and h in (1, 2, 3) and v in (0, 1):
+            field = f"habit_{h}"
+            conn.execute(
+                f"""
+                INSERT INTO experiment_scores (experiment_id, user_id, date, habit_1, habit_2, habit_3, created_at)
+                VALUES (%s, %s, %s, 0, 0, 0, NOW())
+                ON CONFLICT (experiment_id, date) DO UPDATE SET {field} = %s
+                """,
+                (str(row["experiment_id"]), row["user_id"], row["checkin_date"], v),
+            )
+            conn.commit()
+            pre_saved[h] = v
 
         habits = [row["habit_1"], row["habit_2"], row["habit_3"]]
+        date_label = row["checkin_date"].strftime("%A, %B %d")
+
         habit_rows = ""
         for i, habit in enumerate(habits, 1):
+            saved = pre_saved.get(i)
+            y_style = "background:#2da44e;color:white;" if saved == 1 else "background:#f6f8fa;color:#57606a;border:1px solid #d0d7de;"
+            n_style = "background:#cf222e;color:white;" if saved == 0 else "background:#f6f8fa;color:#57606a;border:1px solid #d0d7de;"
             habit_rows += f"""
-            <tr>
-              <td style="padding:12px; border-bottom:1px solid #eee;">{habit}</td>
-              <td style="padding:12px; border-bottom:1px solid #eee; text-align:center;">
+            <div style="border:1px solid #e8ecef;border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;">
+              <div style="font-size:14px;color:#24292f;font-weight:500;flex:1;padding-right:12px;">Habit {i}: {habit}</div>
+              <div style="display:flex;gap:8px;flex-shrink:0;">
                 <a href="/checkin/{token}/submit?habit={i}&val=1"
-                   style="background:#27ae60; color:white; padding:6px 16px; border-radius:4px; text-decoration:none; margin-right:8px;">Y</a>
+                   style="{y_style}border:none;border-radius:6px;padding:7px 18px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;">Y</a>
                 <a href="/checkin/{token}/submit?habit={i}&val=0"
-                   style="background:#e74c3c; color:white; padding:6px 16px; border-radius:4px; text-decoration:none;">N</a>
-              </td>
-            </tr>"""
+                   style="{n_style}border-radius:6px;padding:7px 18px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;">N</a>
+              </div>
+            </div>"""
+
+        saved_msg = f'<div style="background:#d8f3dc;border-radius:8px;padding:10px 14px;font-size:13px;color:#2d6a4f;margin-bottom:16px;">✓ Habit {h} recorded — update any others below.</div>' if pre_saved else ""
 
         return HTMLResponse(f"""
-        <html><body style="font-family:sans-serif; max-width:500px; margin:40px auto; padding:0 20px;">
-          <h2>Habit Check-in — {row['checkin_date']}</h2>
-          <table style="width:100%; border-collapse:collapse;">
-            <thead><tr style="background:#2c3e50; color:white;">
-              <th style="padding:10px; text-align:left;">Habit</th>
-              <th style="padding:10px;">Did you do it?</th>
-            </tr></thead>
-            <tbody>{habit_rows}</tbody>
-          </table>
-        </body></html>
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Habit Check-in — {date_label}</title>
+        </head>
+        <body style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f6f8fa;margin:0;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center;">
+          <div style="background:white;border-radius:12px;max-width:480px;width:100%;padding:28px 24px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+            <div style="font-size:11px;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;color:#57606a;margin-bottom:4px;">Daily Check-in</div>
+            <h2 style="font-size:20px;font-weight:700;color:#1a2332;margin:0 0 20px 0;">{date_label}</h2>
+            {saved_msg}
+            {habit_rows}
+            <div style="margin-top:16px;padding-top:14px;border-top:1px solid #e8ecef;font-size:11px;color:#57606a;text-align:center;">
+              <a href="https://improvehabit.com" style="color:#0969da;text-decoration:none;">ImproveHabit</a>
+              &nbsp;·&nbsp; <a href="https://improvehabit.com/privacy" style="color:#0969da;text-decoration:none;">Privacy</a>
+            </div>
+          </div>
+        </body>
+        </html>
         """)
 
 
@@ -1584,13 +1771,8 @@ async def checkin_submit(token: str, habit: int, val: int):
         )
         conn.commit()
 
-    return HTMLResponse("""
-    <html><body style="font-family:sans-serif; text-align:center; margin-top:80px;">
-      <h2>✅ Got it!</h2>
-      <p>Your response has been recorded.</p>
-      <script>setTimeout(() => window.close(), 1500);</script>
-    </body></html>
-    """)
+    # Redirect back to checkin page so user can update other habits
+    return RedirectResponse(url=f"/checkin/{token}?h={habit}&v={val}", status_code=302)
 
 
 @app.get("/progress/{user_id}/{experiment_id}")
